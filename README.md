@@ -86,6 +86,9 @@ keeps retrying every `retry_interval` (default one minute). The `/config` and
 `/-/config` endpoints will return an error until the configuration is loaded.
 
 The current configuration can be inspected via `/-/config` (or `/config`) endpoint.
+Posting a full YAML configuration to the same endpoint will replace the stored
+configuration in PostgreSQL and trigger a reload. Both viewing and updating the
+configuration honor any authentication configured via `--web.config.file`.
 
 ### TLS and basic authentication
 

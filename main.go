@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -359,24 +360,51 @@ func run() int {
 	})
 
 	configHandler := func(w http.ResponseWriter, r *http.Request) {
-		if dbDSN != "" && !configLoaded {
-			msg := "database unavailable"
-			if dbLoadErr != nil {
-				msg = fmt.Sprintf("%s: %s", msg, dbLoadErr)
+		switch r.Method {
+		case http.MethodGet:
+			if dbDSN != "" && !configLoaded {
+				msg := "database unavailable"
+				if dbLoadErr != nil {
+					msg = fmt.Sprintf("%s: %s", msg, dbLoadErr)
+				}
+				http.Error(w, msg, http.StatusServiceUnavailable)
+				return
 			}
-			http.Error(w, msg, http.StatusServiceUnavailable)
-			return
+			sc.RLock()
+			c, err := yaml.Marshal(sc.C)
+			sc.RUnlock()
+			if err != nil {
+				logger.Warn("Error marshalling configuration", "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write(c)
+		case http.MethodPost:
+			if dbDSN == "" {
+				http.Error(w, "database configuration not enabled", http.StatusBadRequest)
+				return
+			}
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := config.UpsertConfigToDB(data, dbDSN, *configDBUpsert, dbID); err != nil {
+				http.Error(w, sanitizeError(err).Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := loadConfig(); err != nil {
+				logger.Error("Error reloading config", "err", err)
+				startRetry()
+				http.Error(w, sanitizeError(err).Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprintf(w, "This endpoint requires a GET or POST request.\n")
 		}
-		sc.RLock()
-		c, err := yaml.Marshal(sc.C)
-		sc.RUnlock()
-		if err != nil {
-			logger.Warn("Error marshalling configuration", "err", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write(c)
 	}
 	http.HandleFunc(path.Join(*routePrefix, "/config"), configHandler)
 	http.HandleFunc(path.Join(*routePrefix, "/-/config"), configHandler)

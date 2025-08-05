@@ -217,22 +217,18 @@ func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Log
 	return nil
 }
 
-// ImportConfigToDB reads the given configuration file and stores its contents in a PostgreSQL database.
+// UpsertConfigToDB validates the provided YAML configuration and stores it in a PostgreSQL database.
 // The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
-func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
+func UpsertConfigToDB(data []byte, dsn, upsertQuery, id string) error {
 	if id == "" {
 		return errors.New("id must be provided")
-	}
-	data, err := os.ReadFile(confFile)
-	if err != nil {
-		return fmt.Errorf("error reading config file: %w", err)
 	}
 
 	var c Config
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&c); err != nil {
-		return fmt.Errorf("error parsing config file: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
 	jsonData, err := k8syaml.YAMLToJSON(data)
 	if err != nil {
@@ -248,6 +244,16 @@ func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
 		return fmt.Errorf("error writing config to database: %w", err)
 	}
 	return nil
+}
+
+// ImportConfigToDB reads the given configuration file and stores its contents in a PostgreSQL database.
+// The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
+func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
+	data, err := os.ReadFile(confFile)
+	if err != nil {
+		return fmt.Errorf("error reading config file: %w", err)
+	}
+	return UpsertConfigToDB(data, dsn, upsertQuery, id)
 }
 
 // CELProgram encapsulates a cel.Program and makes it YAML marshalable.
