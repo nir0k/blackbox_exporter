@@ -49,8 +49,8 @@ var (
 
 	configFile      = kingpin.Flag("config.file", "Blackbox exporter configuration file.").Default("blackbox.yml").String()
 	configDBDSNFile = kingpin.Flag("config.db_dsn_file", "Path to YAML file containing PostgreSQL connection parameters for configuration. If set, config will be loaded from database.").String()
-	configDBQuery   = kingpin.Flag("config.db_query", "SQL query returning configuration YAML.").Default("SELECT config FROM blackbox_config LIMIT 1").String()
-	configDBUpsert  = kingpin.Flag("config.db_upsert", "SQL upsert statement to store configuration when using --config.db_import.").Default("INSERT INTO blackbox_config (id, config) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config").String()
+	configDBQuery   = kingpin.Flag("config.db_query", "SQL query returning configuration JSON for a given id.").Default("SELECT config FROM blackbox_config WHERE id = $1").String()
+	configDBUpsert  = kingpin.Flag("config.db_upsert", "SQL upsert statement to store configuration when using --config.db_import.").Default("INSERT INTO blackbox_config (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config").String()
 	configDBImport  = kingpin.Flag("config.db_import", "If true, import configuration from --config.file into the database and exit.").Bool()
 	timeoutOffset   = kingpin.Flag("timeout-offset", "Offset to subtract from timeout in seconds.").Default("0.5").Float64()
 	configCheck     = kingpin.Flag("config.check", "If true validate the config file and then exit.").Default().Bool()
@@ -84,7 +84,10 @@ func run() int {
 	logger := promslog.New(promslogConfig)
 	rh := &prober.ResultHistory{MaxResults: *historyLimit}
 
-	var dbDSN string
+	var (
+		dbDSN string
+		dbID  string
+	)
 	if *configDBDSNFile != "" {
 		b, err := os.ReadFile(*configDBDSNFile)
 		if err != nil {
@@ -95,6 +98,13 @@ func run() int {
 		if err := yaml.Unmarshal(b, &params); err != nil {
 			logger.Error("Error parsing DSN YAML", "err", err)
 			return 1
+		}
+		if v, ok := params["id"]; ok {
+			dbID = fmt.Sprint(v)
+			delete(params, "id")
+		} else if v, ok := params["hostname"]; ok {
+			dbID = fmt.Sprint(v)
+			delete(params, "hostname")
 		}
 		parts := make([]string, 0, len(params))
 		for k, v := range params {
@@ -112,11 +122,11 @@ func run() int {
 	logger.Info(version.BuildContext())
 
 	if *configDBImport {
-		if dbDSN == "" {
-			logger.Error("config.db_dsn_file must be set when using --config.db_import")
+		if dbDSN == "" || dbID == "" {
+			logger.Error("config.db_dsn_file with id must be set when using --config.db_import")
 			return 1
 		}
-		if err := config.ImportConfigToDB(*configFile, dbDSN, *configDBUpsert); err != nil {
+		if err := config.ImportConfigToDB(*configFile, dbDSN, *configDBUpsert, dbID); err != nil {
 			logger.Error("Error importing config", "err", err)
 			return 1
 		}
@@ -126,7 +136,10 @@ func run() int {
 
 	loadConfig := func() error {
 		if dbDSN != "" {
-			return sc.ReloadConfigFromDB(dbDSN, *configDBQuery, logger)
+			if dbID == "" {
+				return fmt.Errorf("id must be specified in DSN file")
+			}
+			return sc.ReloadConfigFromDB(dbDSN, *configDBQuery, dbID, logger)
 		}
 		return sc.ReloadConfig(*configFile, logger)
 	}

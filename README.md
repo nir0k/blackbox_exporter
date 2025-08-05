@@ -42,19 +42,20 @@ endpoint <http://localhost:9115/metrics>.
 
 The exporter can load its configuration from a PostgreSQL database instead of a file.
 
-Create a table to hold the YAML configuration:
+Create a table to hold the JSONB configuration keyed by an identifier:
 
 ```sql
 CREATE TABLE blackbox_config (
-  id integer PRIMARY KEY,
-  config text NOT NULL
+  id text PRIMARY KEY,
+  config jsonb NOT NULL
 );
 ```
 
-Store the database connection parameters in a YAML file:
+Store the database connection parameters and the desired configuration `id` in a YAML file:
 
 ```bash
 cat > db_dsn.yml <<'EOF'
+id: instance1
 host: localhost
 port: 5432
 user: user
@@ -72,12 +73,13 @@ Import an existing `blackbox.yml` into the database:
   --config.db_import
 ```
 
-Run the exporter using the configuration from PostgreSQL:
+Run the exporter using the configuration from PostgreSQL (the `id` from `db_dsn.yml` is used automatically):
 
 ```bash
-./blackbox_exporter --config.db_dsn_file=db_dsn.yml \
-  --config.db_query="SELECT config FROM blackbox_config WHERE id=1"
+./blackbox_exporter --config.db_dsn_file=db_dsn.yml
 ```
+
+If no row with that `id` exists, the exporter will fail to start.
 
 The current configuration can be inspected via `/-/config` (or `/config`) endpoint.
 

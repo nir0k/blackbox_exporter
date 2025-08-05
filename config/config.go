@@ -15,6 +15,7 @@ package config
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -154,8 +155,8 @@ func (sc *SafeConfig) ReloadConfig(confFile string, logger *slog.Logger) (err er
 
 // ReloadConfigFromDB reloads the configuration from a PostgreSQL database.
 // dsn is a connection string in the format expected by lib/pq.
-// query should return a single row with the configuration YAML in the first column.
-func (sc *SafeConfig) ReloadConfigFromDB(dsn, query string, logger *slog.Logger) (err error) {
+// query should return a single row with the configuration JSON in the first column for the given id.
+func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Logger) (err error) {
 	var c = &Config{}
 	defer func() {
 		if err != nil {
@@ -172,12 +173,15 @@ func (sc *SafeConfig) ReloadConfigFromDB(dsn, query string, logger *slog.Logger)
 	}
 	defer db.Close()
 
-	var cfgData string
-	if err = db.QueryRow(query).Scan(&cfgData); err != nil {
+	var cfgData []byte
+	if err = db.QueryRow(query, id).Scan(&cfgData); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("no configuration found for id %s", id)
+		}
 		return fmt.Errorf("error fetching config from database: %w", err)
 	}
 
-	decoder := yaml.NewDecoder(strings.NewReader(cfgData))
+	decoder := yaml.NewDecoder(strings.NewReader(string(cfgData)))
 	decoder.KnownFields(true)
 
 	if err = decoder.Decode(c); err != nil {
@@ -208,18 +212,33 @@ func (sc *SafeConfig) ReloadConfigFromDB(dsn, query string, logger *slog.Logger)
 }
 
 // ImportConfigToDB reads the given configuration file and stores its contents in a PostgreSQL database.
-// The upsertQuery should accept the YAML configuration as its first argument.
-func ImportConfigToDB(confFile, dsn, upsertQuery string) error {
+// The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
+func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
+	if id == "" {
+		return errors.New("id must be provided")
+	}
 	data, err := os.ReadFile(confFile)
 	if err != nil {
 		return fmt.Errorf("error reading config file: %w", err)
 	}
+
+	var c Config
+	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&c); err != nil {
+		return fmt.Errorf("error parsing config file: %w", err)
+	}
+	jsonData, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("error converting config to JSON: %w", err)
+	}
+
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return fmt.Errorf("error opening database: %w", err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(upsertQuery, string(data)); err != nil {
+	if _, err := db.Exec(upsertQuery, id, jsonData); err != nil {
 		return fmt.Errorf("error writing config to database: %w", err)
 	}
 	return nil
