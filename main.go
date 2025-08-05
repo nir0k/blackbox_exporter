@@ -42,6 +42,7 @@ import (
 	"github.com/prometheus/exporter-toolkit/web"
 	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
 	"gopkg.in/yaml.v3"
+	k8syaml "sigs.k8s.io/yaml"
 
 	"github.com/prometheus/blackbox_exporter/config"
 	"github.com/prometheus/blackbox_exporter/prober"
@@ -371,15 +372,21 @@ func run() int {
 				return
 			}
 			sc.RLock()
-			c, err := yaml.Marshal(sc.C)
+			yamlData, err := yaml.Marshal(sc.C)
 			sc.RUnlock()
 			if err != nil {
 				logger.Warn("Error marshalling configuration", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "text/plain")
-			w.Write(c)
+			jsonData, err := k8syaml.YAMLToJSON(yamlData)
+			if err != nil {
+				logger.Warn("Error converting configuration to JSON", "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(jsonData)
 		case http.MethodPost:
 			if dbDSN == "" {
 				http.Error(w, "database configuration not enabled", http.StatusBadRequest)

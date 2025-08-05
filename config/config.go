@@ -217,7 +217,7 @@ func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Log
 	return nil
 }
 
-// UpsertConfigToDB validates the provided YAML configuration and stores it in a PostgreSQL database.
+// UpsertConfigToDB validates the provided configuration (JSON or YAML) and stores it in a PostgreSQL database.
 // The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
 func UpsertConfigToDB(data []byte, dsn, upsertQuery, id string) error {
 	if id == "" {

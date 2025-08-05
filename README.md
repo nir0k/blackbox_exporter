@@ -85,10 +85,16 @@ If the configuration cannot be retrieved at startup, the exporter logs the error
 keeps retrying every `retry_interval` (default one minute). The `/config` and
 `/-/config` endpoints will return an error until the configuration is loaded.
 
-The current configuration can be inspected via `/-/config` (or `/config`) endpoint.
-Posting a full YAML configuration to the same endpoint will replace the stored
-configuration in PostgreSQL and trigger a reload. Both viewing and updating the
+The current configuration can be inspected as JSON via `/-/config` (or `/config`).
+Posting a full JSON configuration to the same endpoint replaces the stored
+configuration in PostgreSQL and triggers a reload. Both viewing and updating the
 configuration honor any authentication configured via `--web.config.file`.
+
+Example of posting a JSON configuration:
+
+```bash
+curl -X POST -H 'Content-Type: application/json' --data @config.json http://localhost:9115/-/config
+```
 
 ### TLS and basic authentication
 
