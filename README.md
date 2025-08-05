@@ -43,8 +43,8 @@ endpoint <http://localhost:9115/metrics>.
 ### Using PostgreSQL for configuration
 
 The exporter can load its configuration from a PostgreSQL database instead of a file.
-
-Create a table to hold the JSONB configuration keyed by an identifier:
+At startup it will attempt to create the configured database and table if they do
+not already exist. The table holds the JSONB configuration keyed by an identifier:
 
 ```sql
 CREATE TABLE blackbox_config (
