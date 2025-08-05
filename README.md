@@ -43,8 +43,8 @@ endpoint <http://localhost:9115/metrics>.
 ### Using PostgreSQL for configuration
 
 The exporter can load its configuration from a PostgreSQL database instead of a file.
-
-Create a table to hold the JSONB configuration keyed by an identifier:
+At startup it will attempt to create the configured database and table if they do
+not already exist. The table holds the JSONB configuration keyed by an identifier:
 
 ```sql
 CREATE TABLE blackbox_config (
@@ -150,7 +150,7 @@ curl "http://localhost:9115/probe?target=prometheus.io&module=http_2xx"
 ```bash
 ./blackbox_exporter --config.file ./blackbox.yml --log.level=info --log.prober=debug
 time=2025-05-21T04:10:54.131Z level=INFO source=main.go:88 msg="Starting blackbox_exporter" version="(version=0.26.0, branch=fix/scrape-logger-spam, revision=7df3031feecba82f1a534336979b4e5920f79b72)"
-time=2025-05-21T04:10:54.131Z level=INFO source=main.go:89 msg="(go=go1.24.1, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
+time=2025-05-21T04:10:54.131Z level=INFO source=main.go:89 msg="(go=go1.24.5, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
 time=2025-05-21T04:10:54.132Z level=INFO source=main.go:101 msg="Loaded config file"
 time=2025-05-21T04:10:54.133Z level=INFO source=tls_config.go:347 msg="Listening on" address=[::]:9115
 time=2025-05-21T04:10:54.133Z level=INFO source=tls_config.go:350 msg="TLS is disabled." http2=false address=[::]:9115
@@ -164,7 +164,7 @@ time=2025-05-21T04:10:54.133Z level=INFO source=tls_config.go:350 msg="TLS is di
 ```bash
 ./blackbox_exporter --config.file ./blackbox.yml --log.level=info --log.prober=info
 time=2025-05-21T04:12:09.884Z level=INFO source=main.go:88 msg="Starting blackbox_exporter" version="(version=0.26.0, branch=fix/scrape-logger-spam, revision=7df3031feecba82f1a534336979b4e5920f79b72)"
-time=2025-05-21T04:12:09.884Z level=INFO source=main.go:89 msg="(go=go1.24.1, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
+time=2025-05-21T04:12:09.884Z level=INFO source=main.go:89 msg="(go=go1.24.5, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
 time=2025-05-21T04:12:09.884Z level=INFO source=main.go:101 msg="Loaded config file"
 time=2025-05-21T04:12:09.885Z level=INFO source=tls_config.go:347 msg="Listening on" address=[::]:9115
 time=2025-05-21T04:12:09.885Z level=INFO source=tls_config.go:350 msg="TLS is disabled." http2=false address=[::]:9115
@@ -189,7 +189,7 @@ time=2025-05-21T04:12:13.974Z level=INFO source=handler.go:194 msg="Probe succee
 ```bash
 ./blackbox_exporter --config.file ./blackbox.yml --log.level=debug --log.prober=info 
 time=2025-05-21T04:13:18.497Z level=INFO source=main.go:88 msg="Starting blackbox_exporter" version="(version=0.26.0, branch=fix/scrape-logger-spam, revision=7df3031feecba82f1a534336979b4e5920f79b72)"
-time=2025-05-21T04:13:18.497Z level=INFO source=main.go:89 msg="(go=go1.24.1, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
+time=2025-05-21T04:13:18.497Z level=INFO source=main.go:89 msg="(go=go1.24.5, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
 time=2025-05-21T04:13:18.497Z level=INFO source=main.go:101 msg="Loaded config file"
 time=2025-05-21T04:13:18.498Z level=DEBUG source=main.go:116 msg=http://contraband:9115
 time=2025-05-21T04:13:18.498Z level=DEBUG source=main.go:130 msg=/
@@ -217,7 +217,7 @@ time=2025-05-21T04:13:23.319Z level=INFO source=handler.go:194 msg="Probe succee
 ```bash
 ./blackbox_exporter --config.file ./blackbox.yml --log.level=debug --log.prober=debug
 time=2025-05-21T04:14:55.621Z level=INFO source=main.go:88 msg="Starting blackbox_exporter" version="(version=0.26.0, branch=fix/scrape-logger-spam, revision=7df3031feecba82f1a534336979b4e5920f79b72)"
-time=2025-05-21T04:14:55.621Z level=INFO source=main.go:89 msg="(go=go1.24.1, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
+time=2025-05-21T04:14:55.621Z level=INFO source=main.go:89 msg="(go=go1.24.5, platform=linux/amd64, user=tjhop@contraband, date=20250521-04:00:25, tags=unknown)"
 time=2025-05-21T04:14:55.622Z level=INFO source=main.go:101 msg="Loaded config file"
 time=2025-05-21T04:14:55.622Z level=DEBUG source=main.go:116 msg=http://contraband:9115
 time=2025-05-21T04:14:55.622Z level=DEBUG source=main.go:130 msg=/

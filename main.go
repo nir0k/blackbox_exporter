@@ -14,6 +14,7 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"html"
@@ -150,6 +151,11 @@ func run() int {
 		}
 		if *configDBUpsert == defaultDBUpsert {
 			*configDBUpsert = fmt.Sprintf("INSERT INTO %s (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config", fullTable)
+		}
+
+		if err := ensureDatabaseAndTable(dbDSN, params, dbSchema, dbTable); err != nil {
+			logger.Error("Error ensuring database", "err", err)
+			return 1
 		}
 	}
 
@@ -483,6 +489,67 @@ func run() int {
 		}
 	}
 
+}
+
+func ensureDatabaseAndTable(dsn string, params map[string]interface{}, schema, table string) error {
+	dbname, ok := params["dbname"].(string)
+	if !ok || dbname == "" {
+		return errors.New("dbname must be specified")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err == nil {
+		err = db.Ping()
+	}
+	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "3D000" {
+			paramsCopy := make(map[string]interface{}, len(params))
+			for k, v := range params {
+				paramsCopy[k] = v
+			}
+			paramsCopy["dbname"] = "postgres"
+			parts := make([]string, 0, len(paramsCopy))
+			for k, v := range paramsCopy {
+				parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+			}
+			rootDSN := strings.Join(parts, " ")
+			rootDB, err2 := sql.Open("postgres", rootDSN)
+			if err2 != nil {
+				return fmt.Errorf("error connecting to postgres: %w", err2)
+			}
+			defer rootDB.Close()
+			if _, err2 = rootDB.Exec(fmt.Sprintf("CREATE DATABASE %s", pq.QuoteIdentifier(dbname))); err2 != nil {
+				if pqErr, ok := err2.(*pq.Error); !ok || pqErr.Code != "42P04" {
+					return fmt.Errorf("error creating database: %w", err2)
+				}
+			}
+			if err = db.Close(); err != nil {
+				return fmt.Errorf("error closing database: %w", err)
+			}
+			db, err = sql.Open("postgres", dsn)
+			if err == nil {
+				err = db.Ping()
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("error opening database: %w", err)
+		}
+	}
+	defer db.Close()
+
+	if schema != "" {
+		if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", pq.QuoteIdentifier(schema))); err != nil {
+			return fmt.Errorf("error creating schema: %w", err)
+		}
+	}
+	fullTable := pq.QuoteIdentifier(table)
+	if schema != "" {
+		fullTable = pq.QuoteIdentifier(schema) + "." + fullTable
+	}
+	if _, err := db.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (id TEXT PRIMARY KEY, config JSONB NOT NULL)", fullTable)); err != nil {
+		return fmt.Errorf("error creating table: %w", err)
+	}
+	return nil
 }
 
 var passwordRe = regexp.MustCompile(`password=[^\s]+`)
