@@ -51,11 +51,11 @@ CREATE TABLE blackbox_config (
 );
 ```
 
-Store the database connection parameters and the desired configuration `id` in a YAML file:
+Store the database connection parameters in a YAML file. The `id` defaults to `blackbox` if omitted. You can also specify the table name (default `blackbox_config`) and an optional schema:
 
 ```bash
 cat > db_dsn.yml <<'EOF'
-id: instance1
+# id: blackbox
 host: localhost
 port: 5432
 user: user
@@ -64,6 +64,9 @@ dbname: dbname
 sslmode: disable
 # Optional interval to retry database connection if unavailable
 retry_interval: 1m
+# Optional schema and table to store configuration
+# schema: public
+# table: blackbox_config
 EOF
 ```
 
@@ -73,6 +76,14 @@ Import an existing `blackbox.yml` into the database:
 ./blackbox_exporter --config.file=blackbox.yml \
   --config.db_dsn_file=db_dsn.yml \
   --config.db_import
+```
+
+Export the configuration from the database to a YAML file and exit:
+
+```bash
+./blackbox_exporter --config.file=blackbox.yml \
+  --config.db_dsn_file=db_dsn.yml \
+  --config.db_export
 ```
 
 Run the exporter using the configuration from PostgreSQL (the `id` from `db_dsn.yml` is used automatically):

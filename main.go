@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kingpin/v2"
+	pq "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -48,14 +49,19 @@ import (
 	"github.com/prometheus/blackbox_exporter/prober"
 )
 
-var (
-	sc = config.NewSafeConfig(prometheus.DefaultRegisterer)
+const (
+	defaultDBQuery  = "SELECT config FROM blackbox_config WHERE id = $1"
+	defaultDBUpsert = "INSERT INTO blackbox_config (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config"
+)
 
+var (
+	sc              = config.NewSafeConfig(prometheus.DefaultRegisterer)
 	configFile      = kingpin.Flag("config.file", "Blackbox exporter configuration file.").Default("blackbox.yml").String()
 	configDBDSNFile = kingpin.Flag("config.db_dsn_file", "Path to YAML file containing PostgreSQL connection parameters for configuration. If set, config will be loaded from database.").String()
-	configDBQuery   = kingpin.Flag("config.db_query", "SQL query returning configuration JSON for a given id.").Default("SELECT config FROM blackbox_config WHERE id = $1").String()
-	configDBUpsert  = kingpin.Flag("config.db_upsert", "SQL upsert statement to store configuration when using --config.db_import.").Default("INSERT INTO blackbox_config (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config").String()
+	configDBQuery   = kingpin.Flag("config.db_query", "SQL query returning configuration JSON for a given id.").Default(defaultDBQuery).String()
+	configDBUpsert  = kingpin.Flag("config.db_upsert", "SQL upsert statement to store configuration when using --config.db_import.").Default(defaultDBUpsert).String()
 	configDBImport  = kingpin.Flag("config.db_import", "If true, import configuration from --config.file into the database and exit.").Bool()
+	configDBExport  = kingpin.Flag("config.db_export", "If true, export configuration from the database to --config.file and exit.").Bool()
 	timeoutOffset   = kingpin.Flag("timeout-offset", "Offset to subtract from timeout in seconds.").Default("0.5").Float64()
 	configCheck     = kingpin.Flag("config.check", "If true validate the config file and then exit.").Default().Bool()
 	logLevelProber  = kingpin.Flag("log.prober", "Log level for probe request logs. One of: [debug, info, warn, error]. Defaults to debug. Please see the section `Controlling log level for probe logs` in the project README for more information.").Default("debug").String()
@@ -90,8 +96,10 @@ func run() int {
 
 	var (
 		dbDSN           string
-		dbID            string
+		dbID            = "blackbox"
 		dbRetryInterval = time.Minute
+		dbTable         = "blackbox_config"
+		dbSchema        string
 	)
 	if *configDBDSNFile != "" {
 		b, err := os.ReadFile(*configDBDSNFile)
@@ -119,11 +127,30 @@ func run() int {
 			}
 			delete(params, "retry_interval")
 		}
+		if v, ok := params["table"]; ok {
+			dbTable = fmt.Sprint(v)
+			delete(params, "table")
+		}
+		if v, ok := params["schema"]; ok {
+			dbSchema = fmt.Sprint(v)
+			delete(params, "schema")
+		}
 		parts := make([]string, 0, len(params))
 		for k, v := range params {
 			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 		}
 		dbDSN = strings.Join(parts, " ")
+
+		fullTable := pq.QuoteIdentifier(dbTable)
+		if dbSchema != "" {
+			fullTable = pq.QuoteIdentifier(dbSchema) + "." + fullTable
+		}
+		if *configDBQuery == defaultDBQuery {
+			*configDBQuery = fmt.Sprintf("SELECT config FROM %s WHERE id = $1", fullTable)
+		}
+		if *configDBUpsert == defaultDBUpsert {
+			*configDBUpsert = fmt.Sprintf("INSERT INTO %s (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config", fullTable)
+		}
 	}
 
 	probeLogLevel := promslog.NewLevel()
@@ -144,6 +171,19 @@ func run() int {
 			return 1
 		}
 		logger.Info("Imported config to database")
+		return 0
+	}
+
+	if *configDBExport {
+		if dbDSN == "" {
+			logger.Error("config.db_dsn_file must be set when using --config.db_export")
+			return 1
+		}
+		if err := config.ExportConfigFromDB(*configFile, dbDSN, *configDBQuery, dbID); err != nil {
+			logger.Error("Error exporting config", "err", err)
+			return 1
+		}
+		logger.Info("Exported config from database")
 		return 0
 	}
 

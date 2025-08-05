@@ -256,6 +256,25 @@ func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
 	return UpsertConfigToDB(data, dsn, upsertQuery, id)
 }
 
+// ExportConfigFromDB writes the configuration for the given id from PostgreSQL to a YAML file.
+// The query should return a single row with the configuration JSON in the first column.
+func ExportConfigFromDB(outFile, dsn, query, id string) error {
+	sc := NewSafeConfig(prometheus.NewRegistry())
+	if err := sc.ReloadConfigFromDB(dsn, query, id, nil); err != nil {
+		return err
+	}
+	sc.RLock()
+	yamlData, err := yaml.Marshal(sc.C)
+	sc.RUnlock()
+	if err != nil {
+		return fmt.Errorf("error marshalling config: %w", err)
+	}
+	if err := os.WriteFile(outFile, yamlData, 0o644); err != nil {
+		return fmt.Errorf("error writing config file: %w", err)
+	}
+	return nil
+}
+
 // CELProgram encapsulates a cel.Program and makes it YAML marshalable.
 type CELProgram struct {
 	cel.Program
