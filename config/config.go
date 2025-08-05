@@ -14,6 +14,7 @@
 package config
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,6 +33,7 @@ import (
 	yaml "gopkg.in/yaml.v3"
 
 	"github.com/alecthomas/units"
+	_ "github.com/lib/pq"
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -147,6 +149,79 @@ func (sc *SafeConfig) ReloadConfig(confFile string, logger *slog.Logger) (err er
 	sc.C = c
 	sc.Unlock()
 
+	return nil
+}
+
+// ReloadConfigFromDB reloads the configuration from a PostgreSQL database.
+// dsn is a connection string in the format expected by lib/pq.
+// query should return a single row with the configuration YAML in the first column.
+func (sc *SafeConfig) ReloadConfigFromDB(dsn, query string, logger *slog.Logger) (err error) {
+	var c = &Config{}
+	defer func() {
+		if err != nil {
+			sc.configReloadSuccess.Set(0)
+		} else {
+			sc.configReloadSuccess.Set(1)
+			sc.configReloadSeconds.SetToCurrentTime()
+		}
+	}()
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("error opening database: %w", err)
+	}
+	defer db.Close()
+
+	var cfgData string
+	if err = db.QueryRow(query).Scan(&cfgData); err != nil {
+		return fmt.Errorf("error fetching config from database: %w", err)
+	}
+
+	decoder := yaml.NewDecoder(strings.NewReader(cfgData))
+	decoder.KnownFields(true)
+
+	if err = decoder.Decode(c); err != nil {
+		return fmt.Errorf("error parsing config from database: %s", err)
+	}
+
+	for name, module := range c.Modules {
+		if module.HTTP.NoFollowRedirects != nil {
+			// Hide the old flag from the /config page.
+			module.HTTP.NoFollowRedirects = nil
+			c.Modules[name] = module
+			if logger != nil {
+				logger.Warn("no_follow_redirects is deprecated and will be removed in the next release. It is replaced by follow_redirects.", "module", name)
+			}
+		}
+
+		// Warn if HTTP/3 is enabled - it requires HTTPS targets
+		if module.HTTP.UseHTTP3 && logger != nil {
+			logger.Warn("HTTP/3 is enabled for this module. HTTP targets will be automatically converted to HTTPS during probing. Consider using HTTPS targets directly in your configuration.", "module", name)
+		}
+	}
+
+	sc.Lock()
+	sc.C = c
+	sc.Unlock()
+
+	return nil
+}
+
+// ImportConfigToDB reads the given configuration file and stores its contents in a PostgreSQL database.
+// The upsertQuery should accept the YAML configuration as its first argument.
+func ImportConfigToDB(confFile, dsn, upsertQuery string) error {
+	data, err := os.ReadFile(confFile)
+	if err != nil {
+		return fmt.Errorf("error reading config file: %w", err)
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("error opening database: %w", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(upsertQuery, string(data)); err != nil {
+		return fmt.Errorf("error writing config to database: %w", err)
+	}
 	return nil
 }
 

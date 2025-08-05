@@ -38,6 +38,49 @@ will return debug information for that probe.
 Metrics concerning the operation of the exporter itself are available at the
 endpoint <http://localhost:9115/metrics>.
 
+### Using PostgreSQL for configuration
+
+The exporter can load its configuration from a PostgreSQL database instead of a file.
+
+Create a table to hold the YAML configuration:
+
+```sql
+CREATE TABLE blackbox_config (
+  id integer PRIMARY KEY,
+  config text NOT NULL
+);
+```
+
+Store the database connection parameters in a YAML file:
+
+```bash
+cat > db_dsn.yml <<'EOF'
+host: localhost
+port: 5432
+user: user
+password: password
+dbname: dbname
+sslmode: disable
+EOF
+```
+
+Import an existing `blackbox.yml` into the database:
+
+```bash
+./blackbox_exporter --config.file=blackbox.yml \
+  --config.db_dsn_file=db_dsn.yml \
+  --config.db_import
+```
+
+Run the exporter using the configuration from PostgreSQL:
+
+```bash
+./blackbox_exporter --config.db_dsn_file=db_dsn.yml \
+  --config.db_query="SELECT config FROM blackbox_config WHERE id=1"
+```
+
+The current configuration can be inspected via `/-/config` (or `/config`) endpoint.
+
 ### TLS and basic authentication
 
 The Blackbox Exporter supports TLS and basic authentication. This enables better
