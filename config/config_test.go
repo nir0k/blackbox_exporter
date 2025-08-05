@@ -30,6 +30,17 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+func TestIgnoreDNSForNonDNSProbers(t *testing.T) {
+	data := []byte("modules:\n  http_test:\n    prober: http\n    http:\n      method: GET\n    dns: {}\n")
+	var c Config
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := c.Modules["http_test"]; !ok {
+		t.Fatalf("module not parsed")
+	}
+}
+
 func TestLoadBadConfigs(t *testing.T) {
 	sc := NewSafeConfig(prometheus.NewRegistry())
 	tests := []struct {
@@ -38,7 +49,7 @@ func TestLoadBadConfigs(t *testing.T) {
 	}{
 		{
 			input: "testdata/blackbox-bad.yml",
-			want:  "error parsing config file: yaml: unmarshal errors:\n  line 50: field invalid_extra_field not found in type config.plain",
+			want:  "error parsing config file: yaml: unmarshal errors:\n  line 2: field invalid_extra_field not found in type config.plain",
 		},
 		{
 			input: "testdata/blackbox-bad2.yml",

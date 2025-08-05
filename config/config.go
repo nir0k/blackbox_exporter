@@ -484,9 +484,25 @@ func (s *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
 func (s *Module) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var raw map[string]interface{}
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+
+	if prober, ok := raw["prober"].(string); !ok || prober != "dns" {
+		delete(raw, "dns")
+	}
+
+	data, err := yaml.Marshal(raw)
+	if err != nil {
+		return err
+	}
+
 	*s = DefaultModule
 	type plain Module
-	if err := unmarshal((*plain)(s)); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode((*plain)(s)); err != nil {
 		return err
 	}
 	return nil
