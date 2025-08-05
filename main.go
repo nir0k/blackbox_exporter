@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -24,11 +25,14 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/alecthomas/kingpin/v2"
+	pq "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -39,22 +43,32 @@ import (
 	"github.com/prometheus/exporter-toolkit/web"
 	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
 	"gopkg.in/yaml.v3"
+	k8syaml "sigs.k8s.io/yaml"
 
 	"github.com/prometheus/blackbox_exporter/config"
 	"github.com/prometheus/blackbox_exporter/prober"
 )
 
-var (
-	sc = config.NewSafeConfig(prometheus.DefaultRegisterer)
+const (
+	defaultDBQuery  = "SELECT config FROM blackbox_config WHERE id = $1"
+	defaultDBUpsert = "INSERT INTO blackbox_config (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config"
+)
 
-	configFile     = kingpin.Flag("config.file", "Blackbox exporter configuration file.").Default("blackbox.yml").String()
-	timeoutOffset  = kingpin.Flag("timeout-offset", "Offset to subtract from timeout in seconds.").Default("0.5").Float64()
-	configCheck    = kingpin.Flag("config.check", "If true validate the config file and then exit.").Default().Bool()
-	logLevelProber = kingpin.Flag("log.prober", "Log level for probe request logs. One of: [debug, info, warn, error]. Defaults to debug. Please see the section `Controlling log level for probe logs` in the project README for more information.").Default("debug").String()
-	historyLimit   = kingpin.Flag("history.limit", "The maximum amount of items to keep in the history.").Default("100").Uint()
-	externalURL    = kingpin.Flag("web.external-url", "The URL under which Blackbox exporter is externally reachable (for example, if Blackbox exporter is served via a reverse proxy). Used for generating relative and absolute links back to Blackbox exporter itself. If the URL has a path portion, it will be used to prefix all HTTP endpoints served by Blackbox exporter. If omitted, relevant URL components will be derived automatically.").PlaceHolder("<url>").String()
-	routePrefix    = kingpin.Flag("web.route-prefix", "Prefix for the internal routes of web endpoints. Defaults to path of --web.external-url.").PlaceHolder("<path>").String()
-	toolkitFlags   = webflag.AddFlags(kingpin.CommandLine, ":9115")
+var (
+	sc              = config.NewSafeConfig(prometheus.DefaultRegisterer)
+	configFile      = kingpin.Flag("config.file", "Blackbox exporter configuration file.").Default("blackbox.yml").String()
+	configDBDSNFile = kingpin.Flag("config.db_dsn_file", "Path to YAML file containing PostgreSQL connection parameters for configuration. If set, config will be loaded from database.").String()
+	configDBQuery   = kingpin.Flag("config.db_query", "SQL query returning configuration JSON for a given id.").Default(defaultDBQuery).String()
+	configDBUpsert  = kingpin.Flag("config.db_upsert", "SQL upsert statement to store configuration when using --config.db_import.").Default(defaultDBUpsert).String()
+	configDBImport  = kingpin.Flag("config.db_import", "If true, import configuration from --config.file into the database and exit.").Bool()
+	configDBExport  = kingpin.Flag("config.db_export", "If true, export configuration from the database to --config.file and exit.").Bool()
+	timeoutOffset   = kingpin.Flag("timeout-offset", "Offset to subtract from timeout in seconds.").Default("0.5").Float64()
+	configCheck     = kingpin.Flag("config.check", "If true validate the config file and then exit.").Default().Bool()
+	logLevelProber  = kingpin.Flag("log.prober", "Log level for probe request logs. One of: [debug, info, warn, error]. Defaults to debug. Please see the section `Controlling log level for probe logs` in the project README for more information.").Default("debug").String()
+	historyLimit    = kingpin.Flag("history.limit", "The maximum amount of items to keep in the history.").Default("100").Uint()
+	externalURL     = kingpin.Flag("web.external-url", "The URL under which Blackbox exporter is externally reachable (for example, if Blackbox exporter is served via a reverse proxy). Used for generating relative and absolute links back to Blackbox exporter itself. If the URL has a path portion, it will be used to prefix all HTTP endpoints served by Blackbox exporter. If omitted, relevant URL components will be derived automatically.").PlaceHolder("<url>").String()
+	routePrefix     = kingpin.Flag("web.route-prefix", "Prefix for the internal routes of web endpoints. Defaults to path of --web.external-url.").PlaceHolder("<path>").String()
+	toolkitFlags    = webflag.AddFlags(kingpin.CommandLine, ":9115")
 
 	moduleUnknownCounter = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "blackbox_module_unknown_total",
@@ -80,6 +94,65 @@ func run() int {
 	logger := promslog.New(promslogConfig)
 	rh := &prober.ResultHistory{MaxResults: *historyLimit}
 
+	var (
+		dbDSN           string
+		dbID            = "blackbox"
+		dbRetryInterval = time.Minute
+		dbTable         = "blackbox_config"
+		dbSchema        string
+	)
+	if *configDBDSNFile != "" {
+		b, err := os.ReadFile(*configDBDSNFile)
+		if err != nil {
+			logger.Error("Error reading DSN file", "err", err)
+			return 1
+		}
+		var params map[string]interface{}
+		if err := yaml.Unmarshal(b, &params); err != nil {
+			logger.Error("Error parsing DSN YAML", "err", err)
+			return 1
+		}
+		if v, ok := params["id"]; ok {
+			dbID = fmt.Sprint(v)
+			delete(params, "id")
+		} else if v, ok := params["hostname"]; ok {
+			dbID = fmt.Sprint(v)
+			delete(params, "hostname")
+		}
+		if v, ok := params["retry_interval"]; ok {
+			if d, err := time.ParseDuration(fmt.Sprint(v)); err == nil {
+				dbRetryInterval = d
+			} else {
+				logger.Warn("Invalid retry_interval, using default", "value", v)
+			}
+			delete(params, "retry_interval")
+		}
+		if v, ok := params["table"]; ok {
+			dbTable = fmt.Sprint(v)
+			delete(params, "table")
+		}
+		if v, ok := params["schema"]; ok {
+			dbSchema = fmt.Sprint(v)
+			delete(params, "schema")
+		}
+		parts := make([]string, 0, len(params))
+		for k, v := range params {
+			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+		}
+		dbDSN = strings.Join(parts, " ")
+
+		fullTable := pq.QuoteIdentifier(dbTable)
+		if dbSchema != "" {
+			fullTable = pq.QuoteIdentifier(dbSchema) + "." + fullTable
+		}
+		if *configDBQuery == defaultDBQuery {
+			*configDBQuery = fmt.Sprintf("SELECT config FROM %s WHERE id = $1", fullTable)
+		}
+		if *configDBUpsert == defaultDBUpsert {
+			*configDBUpsert = fmt.Sprintf("INSERT INTO %s (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config", fullTable)
+		}
+	}
+
 	probeLogLevel := promslog.NewLevel()
 	if err := probeLogLevel.Set(*logLevelProber); err != nil {
 		logger.Warn("Error setting log prober level, log prober level unchanged", "err", err, "current_level", probeLogLevel.String())
@@ -88,17 +161,90 @@ func run() int {
 	logger.Info("Starting blackbox_exporter", "version", version.Info())
 	logger.Info(version.BuildContext())
 
-	if err := sc.ReloadConfig(*configFile, logger); err != nil {
-		logger.Error("Error loading config", "err", err)
-		return 1
-	}
-
-	if *configCheck {
-		logger.Info("Config file is ok exiting...")
+	if *configDBImport {
+		if dbDSN == "" || dbID == "" {
+			logger.Error("config.db_dsn_file with id must be set when using --config.db_import")
+			return 1
+		}
+		if err := config.ImportConfigToDB(*configFile, dbDSN, *configDBUpsert, dbID); err != nil {
+			logger.Error("Error importing config", "err", err)
+			return 1
+		}
+		logger.Info("Imported config to database")
 		return 0
 	}
 
-	logger.Info("Loaded config file")
+	if *configDBExport {
+		if dbDSN == "" {
+			logger.Error("config.db_dsn_file must be set when using --config.db_export")
+			return 1
+		}
+		if err := config.ExportConfigFromDB(*configFile, dbDSN, *configDBQuery, dbID); err != nil {
+			logger.Error("Error exporting config", "err", err)
+			return 1
+		}
+		logger.Info("Exported config from database")
+		return 0
+	}
+
+	var (
+		configLoaded bool
+		dbLoadErr    error
+		retryTicker  *time.Ticker
+	)
+	loadConfig := func() error {
+		var err error
+		if dbDSN != "" {
+			if dbID == "" {
+				err = fmt.Errorf("id must be specified in DSN file")
+			} else {
+				err = sc.ReloadConfigFromDB(dbDSN, *configDBQuery, dbID, logger)
+			}
+		} else {
+			err = sc.ReloadConfig(*configFile, logger)
+		}
+		if err != nil {
+			dbLoadErr = sanitizeError(err)
+		} else {
+			configLoaded = true
+			dbLoadErr = nil
+		}
+		return err
+	}
+
+	startRetry := func() {
+		if dbDSN == "" {
+			return
+		}
+		if retryTicker != nil {
+			return
+		}
+		retryTicker = time.NewTicker(dbRetryInterval)
+		go func() {
+			for range retryTicker.C {
+				if err := loadConfig(); err != nil {
+					logger.Error("Error loading config", "err", err)
+					continue
+				}
+				logger.Info("Loaded config")
+				retryTicker.Stop()
+				retryTicker = nil
+				break
+			}
+		}()
+	}
+
+	if err := loadConfig(); err != nil {
+		logger.Error("Error loading config", "err", err)
+		startRetry()
+	} else {
+		logger.Info("Loaded config")
+	}
+
+	if *configCheck {
+		logger.Info("Config is ok exiting...")
+		return 0
+	}
 
 	// Infer or set Blackbox exporter externalURL
 	listenAddrs := toolkitFlags.WebListenAddresses
@@ -136,17 +282,19 @@ func run() int {
 		for {
 			select {
 			case <-hup:
-				if err := sc.ReloadConfig(*configFile, logger); err != nil {
+				if err := loadConfig(); err != nil {
 					logger.Error("Error reloading config", "err", err)
+					startRetry()
 					continue
 				}
-				logger.Info("Reloaded config file")
+				logger.Info("Reloaded config")
 			case rc := <-reloadCh:
-				if err := sc.ReloadConfig(*configFile, logger); err != nil {
+				if err := loadConfig(); err != nil {
 					logger.Error("Error reloading config", "err", err)
+					startRetry()
 					rc <- err
 				} else {
-					logger.Info("Reloaded config file")
+					logger.Info("Reloaded config")
 					rc <- nil
 				}
 			}
@@ -252,18 +400,66 @@ func run() int {
 		w.Write([]byte(result.DebugOutput))
 	})
 
-	http.HandleFunc(path.Join(*routePrefix, "/config"), func(w http.ResponseWriter, r *http.Request) {
-		sc.RLock()
-		c, err := yaml.Marshal(sc.C)
-		sc.RUnlock()
-		if err != nil {
-			logger.Warn("Error marshalling configuration", "err", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+	configHandler := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if dbDSN != "" && !configLoaded {
+				msg := "database unavailable"
+				if dbLoadErr != nil {
+					msg = fmt.Sprintf("%s: %s", msg, dbLoadErr)
+				}
+				http.Error(w, msg, http.StatusServiceUnavailable)
+				return
+			}
+			sc.RLock()
+			yamlData, err := yaml.Marshal(sc.C)
+			sc.RUnlock()
+			if err != nil {
+				logger.Warn("Error marshalling configuration", "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			jsonData, err := k8syaml.YAMLToJSON(yamlData)
+			if err != nil {
+				logger.Warn("Error converting configuration to JSON", "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(jsonData)
+		case http.MethodPost:
+			if dbDSN == "" {
+				http.Error(w, "database configuration not enabled", http.StatusBadRequest)
+				return
+			}
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := config.UpsertConfigToDB(data, dbDSN, *configDBUpsert, dbID); err != nil {
+				http.Error(w, sanitizeError(err).Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := loadConfig(); err != nil {
+				logger.Error("Error reloading config", "err", err)
+				startRetry()
+				http.Error(w, sanitizeError(err).Error(), http.StatusInternalServerError)
+				return
+			}
+			if retryTicker != nil {
+				retryTicker.Stop()
+				retryTicker = nil
+			}
+			logger.Info("Loaded config")
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprintf(w, "This endpoint requires a GET or POST request.\n")
 		}
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write(c)
-	})
+	}
+	http.HandleFunc(path.Join(*routePrefix, "/config"), configHandler)
+	http.HandleFunc(path.Join(*routePrefix, "/-/config"), configHandler)
 
 	srv := &http.Server{}
 	srvc := make(chan struct{})
@@ -287,6 +483,15 @@ func run() int {
 		}
 	}
 
+}
+
+var passwordRe = regexp.MustCompile(`password=[^\s]+`)
+
+func sanitizeError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(passwordRe.ReplaceAllString(err.Error(), "password=REDACTED"))
 }
 
 func startsOrEndsWithQuote(s string) bool {

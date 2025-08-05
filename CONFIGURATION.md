@@ -4,6 +4,8 @@ The file is written in [YAML format](http://en.wikipedia.org/wiki/YAML), defined
 Brackets indicate that a parameter is optional.
 For non-list parameters the value is set to the specified default.
 
+This fork also allows persisting the same configuration in a PostgreSQL database via JSON.
+
 Generic placeholders are defined as follows:
 
 * `<boolean>`: a boolean that can take the values `true` or `false`

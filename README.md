@@ -7,6 +7,8 @@
 The blackbox exporter allows blackbox probing of endpoints over
 HTTP, HTTPS, DNS, TCP, ICMP and gRPC.
 
+This fork extends the upstream project by allowing configuration to be stored and managed in a PostgreSQL database.
+
 ## Running this software
 
 ### From binaries
@@ -37,6 +39,75 @@ will return debug information for that probe.
 
 Metrics concerning the operation of the exporter itself are available at the
 endpoint <http://localhost:9115/metrics>.
+
+### Using PostgreSQL for configuration
+
+The exporter can load its configuration from a PostgreSQL database instead of a file.
+
+Create a table to hold the JSONB configuration keyed by an identifier:
+
+```sql
+CREATE TABLE blackbox_config (
+  id text PRIMARY KEY,
+  config jsonb NOT NULL
+);
+```
+
+Store the database connection parameters in a YAML file. The `id` defaults to `blackbox` if omitted. You can also specify the table name (default `blackbox_config`) and an optional schema:
+
+```bash
+cat > db_dsn.yml <<'EOF'
+# id: blackbox
+host: localhost
+port: 5432
+user: user
+password: password
+dbname: dbname
+sslmode: disable
+# Optional interval to retry database connection if unavailable
+retry_interval: 1m
+# Optional schema and table to store configuration
+# schema: public
+# table: blackbox_config
+EOF
+```
+
+Import an existing `blackbox.yml` into the database:
+
+```bash
+./blackbox_exporter --config.file=blackbox.yml \
+  --config.db_dsn_file=db_dsn.yml \
+  --config.db_import
+```
+
+Export the configuration from the database to a YAML file and exit:
+
+```bash
+./blackbox_exporter --config.file=blackbox.yml \
+  --config.db_dsn_file=db_dsn.yml \
+  --config.db_export
+```
+
+Run the exporter using the configuration from PostgreSQL (the `id` from `db_dsn.yml` is used automatically):
+
+```bash
+./blackbox_exporter --config.db_dsn_file=db_dsn.yml
+```
+
+If the configuration cannot be retrieved at startup, the exporter logs the error and
+keeps retrying every `retry_interval` (default one minute). The `/config` and
+`/-/config` endpoints will return an error until the configuration is loaded.
+
+The current configuration can be inspected as JSON via `/-/config` (or `/config`).
+Posting a full JSON configuration to the same endpoint replaces the stored
+configuration in PostgreSQL and triggers a reload. Both viewing and updating the
+configuration honor any authentication configured via `--web.config.file`.
+
+Example of posting a JSON configuration:
+
+```bash
+curl -X POST -H 'Content-Type: application/json' --data @config.json http://localhost:9115/-/config
+```
 
 ### TLS and basic authentication
 

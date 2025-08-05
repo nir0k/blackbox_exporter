@@ -14,6 +14,8 @@
 package config
 
 import (
+	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,8 +32,10 @@ import (
 
 	"github.com/google/cel-go/cel"
 	yaml "gopkg.in/yaml.v3"
+	k8syaml "sigs.k8s.io/yaml"
 
 	"github.com/alecthomas/units"
+	_ "github.com/lib/pq"
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -147,6 +151,127 @@ func (sc *SafeConfig) ReloadConfig(confFile string, logger *slog.Logger) (err er
 	sc.C = c
 	sc.Unlock()
 
+	return nil
+}
+
+// ReloadConfigFromDB reloads the configuration from a PostgreSQL database.
+// dsn is a connection string in the format expected by lib/pq.
+// query should return a single row with the configuration JSON in the first column for the given id.
+func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Logger) (err error) {
+	var c = &Config{}
+	defer func() {
+		if err != nil {
+			sc.configReloadSuccess.Set(0)
+		} else {
+			sc.configReloadSuccess.Set(1)
+			sc.configReloadSeconds.SetToCurrentTime()
+		}
+	}()
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("error opening database: %w", err)
+	}
+	defer db.Close()
+
+	var cfgData []byte
+	if err = db.QueryRow(query, id).Scan(&cfgData); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("no configuration found for id %s", id)
+		}
+		return fmt.Errorf("error fetching config from database: %w", err)
+	}
+
+	yamlData, err := k8syaml.JSONToYAML(cfgData)
+	if err != nil {
+		return fmt.Errorf("error converting config from JSON: %w", err)
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(yamlData))
+	decoder.KnownFields(true)
+
+	if err = decoder.Decode(c); err != nil {
+		return fmt.Errorf("error parsing config from database: %s", err)
+	}
+
+	for name, module := range c.Modules {
+		if module.HTTP.NoFollowRedirects != nil {
+			// Hide the old flag from the /config page.
+			module.HTTP.NoFollowRedirects = nil
+			c.Modules[name] = module
+			if logger != nil {
+				logger.Warn("no_follow_redirects is deprecated and will be removed in the next release. It is replaced by follow_redirects.", "module", name)
+			}
+		}
+
+		// Warn if HTTP/3 is enabled - it requires HTTPS targets
+		if module.HTTP.UseHTTP3 && logger != nil {
+			logger.Warn("HTTP/3 is enabled for this module. HTTP targets will be automatically converted to HTTPS during probing. Consider using HTTPS targets directly in your configuration.", "module", name)
+		}
+	}
+
+	sc.Lock()
+	sc.C = c
+	sc.Unlock()
+
+	return nil
+}
+
+// UpsertConfigToDB validates the provided configuration (JSON or YAML) and stores it in a PostgreSQL database.
+// The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
+func UpsertConfigToDB(data []byte, dsn, upsertQuery, id string) error {
+	if id == "" {
+		return errors.New("id must be provided")
+	}
+
+	var c Config
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&c); err != nil {
+		return fmt.Errorf("error parsing config: %w", err)
+	}
+	jsonData, err := k8syaml.YAMLToJSON(data)
+	if err != nil {
+		return fmt.Errorf("error converting config to JSON: %w", err)
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("error opening database: %w", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(upsertQuery, id, jsonData); err != nil {
+		return fmt.Errorf("error writing config to database: %w", err)
+	}
+	return nil
+}
+
+// ImportConfigToDB reads the given configuration file and stores its contents in a PostgreSQL database.
+// The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
+func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
+	data, err := os.ReadFile(confFile)
+	if err != nil {
+		return fmt.Errorf("error reading config file: %w", err)
+	}
+	return UpsertConfigToDB(data, dsn, upsertQuery, id)
+}
+
+// ExportConfigFromDB writes the configuration for the given id from PostgreSQL to a YAML file.
+// The query should return a single row with the configuration JSON in the first column.
+func ExportConfigFromDB(outFile, dsn, query, id string) error {
+	sc := NewSafeConfig(prometheus.NewRegistry())
+	if err := sc.ReloadConfigFromDB(dsn, query, id, nil); err != nil {
+		return err
+	}
+	sc.RLock()
+	yamlData, err := yaml.Marshal(sc.C)
+	sc.RUnlock()
+	if err != nil {
+		return fmt.Errorf("error marshalling config: %w", err)
+	}
+	if err := os.WriteFile(outFile, yamlData, 0o644); err != nil {
+		return fmt.Errorf("error writing config file: %w", err)
+	}
 	return nil
 }
 
@@ -378,9 +503,25 @@ func (s *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
 func (s *Module) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var raw map[string]interface{}
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+
+	if prober, ok := raw["prober"].(string); !ok || prober != "dns" {
+		delete(raw, "dns")
+	}
+
+	data, err := yaml.Marshal(raw)
+	if err != nil {
+		return err
+	}
+
 	*s = DefaultModule
 	type plain Module
-	if err := unmarshal((*plain)(s)); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode((*plain)(s)); err != nil {
 		return err
 	}
 	return nil
