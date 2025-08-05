@@ -407,6 +407,11 @@ func run() int {
 				http.Error(w, sanitizeError(err).Error(), http.StatusInternalServerError)
 				return
 			}
+			if retryTicker != nil {
+				retryTicker.Stop()
+				retryTicker = nil
+			}
+			logger.Info("Loaded config")
 			w.WriteHeader(http.StatusOK)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
