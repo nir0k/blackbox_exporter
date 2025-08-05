@@ -62,6 +62,8 @@ user: user
 password: password
 dbname: dbname
 sslmode: disable
+# Optional interval to retry database connection if unavailable
+retry_interval: 1m
 EOF
 ```
 
@@ -79,7 +81,9 @@ Run the exporter using the configuration from PostgreSQL (the `id` from `db_dsn.
 ./blackbox_exporter --config.db_dsn_file=db_dsn.yml
 ```
 
-If no row with that `id` exists, the exporter will fail to start.
+If the configuration cannot be retrieved at startup, the exporter logs the error and
+keeps retrying every `retry_interval` (default one minute). The `/config` and
+`/-/config` endpoints will return an error until the configuration is loaded.
 
 The current configuration can be inspected via `/-/config` (or `/config`) endpoint.
 

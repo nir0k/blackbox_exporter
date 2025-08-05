@@ -24,9 +24,11 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/client_golang/prometheus"
@@ -85,8 +87,9 @@ func run() int {
 	rh := &prober.ResultHistory{MaxResults: *historyLimit}
 
 	var (
-		dbDSN string
-		dbID  string
+		dbDSN           string
+		dbID            string
+		dbRetryInterval = time.Minute
 	)
 	if *configDBDSNFile != "" {
 		b, err := os.ReadFile(*configDBDSNFile)
@@ -105,6 +108,14 @@ func run() int {
 		} else if v, ok := params["hostname"]; ok {
 			dbID = fmt.Sprint(v)
 			delete(params, "hostname")
+		}
+		if v, ok := params["retry_interval"]; ok {
+			if d, err := time.ParseDuration(fmt.Sprint(v)); err == nil {
+				dbRetryInterval = d
+			} else {
+				logger.Warn("Invalid retry_interval, using default", "value", v)
+			}
+			delete(params, "retry_interval")
 		}
 		parts := make([]string, 0, len(params))
 		for k, v := range params {
@@ -134,27 +145,64 @@ func run() int {
 		return 0
 	}
 
+	var (
+		configLoaded bool
+		dbLoadErr    error
+		retryTicker  *time.Ticker
+	)
 	loadConfig := func() error {
+		var err error
 		if dbDSN != "" {
 			if dbID == "" {
-				return fmt.Errorf("id must be specified in DSN file")
+				err = fmt.Errorf("id must be specified in DSN file")
+			} else {
+				err = sc.ReloadConfigFromDB(dbDSN, *configDBQuery, dbID, logger)
 			}
-			return sc.ReloadConfigFromDB(dbDSN, *configDBQuery, dbID, logger)
+		} else {
+			err = sc.ReloadConfig(*configFile, logger)
 		}
-		return sc.ReloadConfig(*configFile, logger)
+		if err != nil {
+			dbLoadErr = sanitizeError(err)
+		} else {
+			configLoaded = true
+			dbLoadErr = nil
+		}
+		return err
+	}
+
+	startRetry := func() {
+		if dbDSN == "" {
+			return
+		}
+		if retryTicker != nil {
+			return
+		}
+		retryTicker = time.NewTicker(dbRetryInterval)
+		go func() {
+			for range retryTicker.C {
+				if err := loadConfig(); err != nil {
+					logger.Error("Error loading config", "err", err)
+					continue
+				}
+				logger.Info("Loaded config")
+				retryTicker.Stop()
+				retryTicker = nil
+				break
+			}
+		}()
 	}
 
 	if err := loadConfig(); err != nil {
 		logger.Error("Error loading config", "err", err)
-		return 1
+		startRetry()
+	} else {
+		logger.Info("Loaded config")
 	}
 
 	if *configCheck {
 		logger.Info("Config is ok exiting...")
 		return 0
 	}
-
-	logger.Info("Loaded config")
 
 	// Infer or set Blackbox exporter externalURL
 	listenAddrs := toolkitFlags.WebListenAddresses
@@ -194,12 +242,14 @@ func run() int {
 			case <-hup:
 				if err := loadConfig(); err != nil {
 					logger.Error("Error reloading config", "err", err)
+					startRetry()
 					continue
 				}
 				logger.Info("Reloaded config")
 			case rc := <-reloadCh:
 				if err := loadConfig(); err != nil {
 					logger.Error("Error reloading config", "err", err)
+					startRetry()
 					rc <- err
 				} else {
 					logger.Info("Reloaded config")
@@ -309,6 +359,14 @@ func run() int {
 	})
 
 	configHandler := func(w http.ResponseWriter, r *http.Request) {
+		if dbDSN != "" && !configLoaded {
+			msg := "database unavailable"
+			if dbLoadErr != nil {
+				msg = fmt.Sprintf("%s: %s", msg, dbLoadErr)
+			}
+			http.Error(w, msg, http.StatusServiceUnavailable)
+			return
+		}
 		sc.RLock()
 		c, err := yaml.Marshal(sc.C)
 		sc.RUnlock()
@@ -345,6 +403,15 @@ func run() int {
 		}
 	}
 
+}
+
+var passwordRe = regexp.MustCompile(`password=[^\s]+`)
+
+func sanitizeError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(passwordRe.ReplaceAllString(err.Error(), "password=REDACTED"))
 }
 
 func startsOrEndsWithQuote(s string) bool {
