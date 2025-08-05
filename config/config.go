@@ -14,8 +14,8 @@
 package config
 
 import (
+	"bytes"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,6 +32,7 @@ import (
 
 	"github.com/google/cel-go/cel"
 	yaml "gopkg.in/yaml.v3"
+	k8syaml "sigs.k8s.io/yaml"
 
 	"github.com/alecthomas/units"
 	_ "github.com/lib/pq"
@@ -181,7 +182,12 @@ func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Log
 		return fmt.Errorf("error fetching config from database: %w", err)
 	}
 
-	decoder := yaml.NewDecoder(strings.NewReader(string(cfgData)))
+	yamlData, err := k8syaml.JSONToYAML(cfgData)
+	if err != nil {
+		return fmt.Errorf("error converting config from JSON: %w", err)
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(yamlData))
 	decoder.KnownFields(true)
 
 	if err = decoder.Decode(c); err != nil {
@@ -223,12 +229,12 @@ func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
 	}
 
 	var c Config
-	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&c); err != nil {
 		return fmt.Errorf("error parsing config file: %w", err)
 	}
-	jsonData, err := json.Marshal(c)
+	jsonData, err := k8syaml.YAMLToJSON(data)
 	if err != nil {
 		return fmt.Errorf("error converting config to JSON: %w", err)
 	}
