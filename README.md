@@ -7,6 +7,8 @@
 The blackbox exporter allows blackbox probing of endpoints over
 HTTP, HTTPS, DNS, TCP, ICMP and gRPC.
 
+This fork extends the upstream project by allowing configuration to be stored and managed in a PostgreSQL database.
+
 ## Running this software
 
 ### From binaries

@@ -1,13 +1,6 @@
 ## master / unreleased
 
-BREAKING CHANGES:
-
-Changes:
-
-* [CHANGE]
-* [FEATURE]
-* [ENHANCEMENT]
-* [BUGFIX]
+* [FEATURE] Allow storing and reloading configuration from PostgreSQL via JSON endpoints
 
 ## 0.27.0 / 2025-06-26
 
