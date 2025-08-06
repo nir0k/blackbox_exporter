@@ -72,6 +72,10 @@ retry_interval: 1m
 EOF
 ```
 
+The SQL queries to load or store the configuration are derived from the
+`schema` and `table` values above. Manual overrides via flags are no longer
+supported.
+
 Import an existing `blackbox.yml` into the database:
 
 ```bash
