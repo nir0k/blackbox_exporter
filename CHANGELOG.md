@@ -1,6 +1,7 @@
 ## master / unreleased
 
 * [FEATURE] Allow storing and reloading configuration from PostgreSQL via JSON endpoints
+* [CHANGE] Remove `config.db_query` and `config.db_upsert` flags; SQL statements are built from schema and table settings
 
 ## 0.27.0 / 2025-06-26
 

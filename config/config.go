@@ -35,7 +35,7 @@ import (
 	k8syaml "sigs.k8s.io/yaml"
 
 	"github.com/alecthomas/units"
-	_ "github.com/lib/pq"
+	pq "github.com/lib/pq"
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -154,10 +154,19 @@ func (sc *SafeConfig) ReloadConfig(confFile string, logger *slog.Logger) (err er
 	return nil
 }
 
+func buildQueries(schema, table string) (selectQuery, upsertQuery string) {
+	fullTable := pq.QuoteIdentifier(table)
+	if schema != "" {
+		fullTable = pq.QuoteIdentifier(schema) + "." + fullTable
+	}
+	selectQuery = fmt.Sprintf("SELECT config FROM %s WHERE id = $1", fullTable)
+	upsertQuery = fmt.Sprintf("INSERT INTO %s (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config", fullTable)
+	return
+}
+
 // ReloadConfigFromDB reloads the configuration from a PostgreSQL database.
 // dsn is a connection string in the format expected by lib/pq.
-// query should return a single row with the configuration JSON in the first column for the given id.
-func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Logger) (err error) {
+func (sc *SafeConfig) ReloadConfigFromDB(dsn, schema, table, id string, logger *slog.Logger) (err error) {
 	var c = &Config{}
 	defer func() {
 		if err != nil {
@@ -174,8 +183,9 @@ func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Log
 	}
 	defer db.Close()
 
+	selectQuery, _ := buildQueries(schema, table)
 	var cfgData []byte
-	if err = db.QueryRow(query, id).Scan(&cfgData); err != nil {
+	if err = db.QueryRow(selectQuery, id).Scan(&cfgData); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("no configuration found for id %s", id)
 		}
@@ -218,8 +228,7 @@ func (sc *SafeConfig) ReloadConfigFromDB(dsn, query, id string, logger *slog.Log
 }
 
 // UpsertConfigToDB validates the provided configuration (JSON or YAML) and stores it in a PostgreSQL database.
-// The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
-func UpsertConfigToDB(data []byte, dsn, upsertQuery, id string) error {
+func UpsertConfigToDB(data []byte, dsn, schema, table, id string) error {
 	if id == "" {
 		return errors.New("id must be provided")
 	}
@@ -240,6 +249,7 @@ func UpsertConfigToDB(data []byte, dsn, upsertQuery, id string) error {
 		return fmt.Errorf("error opening database: %w", err)
 	}
 	defer db.Close()
+	_, upsertQuery := buildQueries(schema, table)
 	if _, err := db.Exec(upsertQuery, id, jsonData); err != nil {
 		return fmt.Errorf("error writing config to database: %w", err)
 	}
@@ -247,20 +257,18 @@ func UpsertConfigToDB(data []byte, dsn, upsertQuery, id string) error {
 }
 
 // ImportConfigToDB reads the given configuration file and stores its contents in a PostgreSQL database.
-// The upsertQuery should accept the id as its first argument and the JSON configuration as its second argument.
-func ImportConfigToDB(confFile, dsn, upsertQuery, id string) error {
+func ImportConfigToDB(confFile, dsn, schema, table, id string) error {
 	data, err := os.ReadFile(confFile)
 	if err != nil {
 		return fmt.Errorf("error reading config file: %w", err)
 	}
-	return UpsertConfigToDB(data, dsn, upsertQuery, id)
+	return UpsertConfigToDB(data, dsn, schema, table, id)
 }
 
 // ExportConfigFromDB writes the configuration for the given id from PostgreSQL to a YAML file.
-// The query should return a single row with the configuration JSON in the first column.
-func ExportConfigFromDB(outFile, dsn, query, id string) error {
+func ExportConfigFromDB(outFile, dsn, schema, table, id string) error {
 	sc := NewSafeConfig(prometheus.NewRegistry())
-	if err := sc.ReloadConfigFromDB(dsn, query, id, nil); err != nil {
+	if err := sc.ReloadConfigFromDB(dsn, schema, table, id, nil); err != nil {
 		return err
 	}
 	sc.RLock()

@@ -158,6 +158,36 @@ func TestHideConfigSecrets(t *testing.T) {
 	}
 }
 
+func TestBuildQueries(t *testing.T) {
+	cases := []struct {
+		schema  string
+		table   string
+		selectQ string
+		upsertQ string
+	}{
+		{
+			table:   "cfg",
+			selectQ: "SELECT config FROM \"cfg\" WHERE id = $1",
+			upsertQ: "INSERT INTO \"cfg\" (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config",
+		},
+		{
+			schema:  "public",
+			table:   "cfg",
+			selectQ: "SELECT config FROM \"public\".\"cfg\" WHERE id = $1",
+			upsertQ: "INSERT INTO \"public\".\"cfg\" (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config",
+		},
+	}
+	for _, c := range cases {
+		s, u := buildQueries(c.schema, c.table)
+		if s != c.selectQ {
+			t.Errorf("unexpected select query %q, want %q", s, c.selectQ)
+		}
+		if u != c.upsertQ {
+			t.Errorf("unexpected upsert query %q, want %q", u, c.upsertQ)
+		}
+	}
+}
+
 func TestIsEncodingAcceptable(t *testing.T) {
 	testcases := map[string]struct {
 		input          string

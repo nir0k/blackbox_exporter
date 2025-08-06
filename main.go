@@ -50,17 +50,10 @@ import (
 	"github.com/prometheus/blackbox_exporter/prober"
 )
 
-const (
-	defaultDBQuery  = "SELECT config FROM blackbox_config WHERE id = $1"
-	defaultDBUpsert = "INSERT INTO blackbox_config (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config"
-)
-
 var (
 	sc              = config.NewSafeConfig(prometheus.DefaultRegisterer)
 	configFile      = kingpin.Flag("config.file", "Blackbox exporter configuration file.").Default("blackbox.yml").String()
 	configDBDSNFile = kingpin.Flag("config.db_dsn_file", "Path to YAML file containing PostgreSQL connection parameters for configuration. If set, config will be loaded from database.").String()
-	configDBQuery   = kingpin.Flag("config.db_query", "SQL query returning configuration JSON for a given id.").Default(defaultDBQuery).String()
-	configDBUpsert  = kingpin.Flag("config.db_upsert", "SQL upsert statement to store configuration when using --config.db_import.").Default(defaultDBUpsert).String()
 	configDBImport  = kingpin.Flag("config.db_import", "If true, import configuration from --config.file into the database and exit.").Bool()
 	configDBExport  = kingpin.Flag("config.db_export", "If true, export configuration from the database to --config.file and exit.").Bool()
 	timeoutOffset   = kingpin.Flag("timeout-offset", "Offset to subtract from timeout in seconds.").Default("0.5").Float64()
@@ -142,17 +135,6 @@ func run() int {
 		}
 		dbDSN = strings.Join(parts, " ")
 
-		fullTable := pq.QuoteIdentifier(dbTable)
-		if dbSchema != "" {
-			fullTable = pq.QuoteIdentifier(dbSchema) + "." + fullTable
-		}
-		if *configDBQuery == defaultDBQuery {
-			*configDBQuery = fmt.Sprintf("SELECT config FROM %s WHERE id = $1", fullTable)
-		}
-		if *configDBUpsert == defaultDBUpsert {
-			*configDBUpsert = fmt.Sprintf("INSERT INTO %s (id, config) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config", fullTable)
-		}
-
 		if err := ensureDatabaseAndTable(dbDSN, params, dbSchema, dbTable); err != nil {
 			logger.Error("Error ensuring database", "err", err)
 			return 1
@@ -172,7 +154,7 @@ func run() int {
 			logger.Error("config.db_dsn_file with id must be set when using --config.db_import")
 			return 1
 		}
-		if err := config.ImportConfigToDB(*configFile, dbDSN, *configDBUpsert, dbID); err != nil {
+		if err := config.ImportConfigToDB(*configFile, dbDSN, dbSchema, dbTable, dbID); err != nil {
 			logger.Error("Error importing config", "err", err)
 			return 1
 		}
@@ -185,7 +167,7 @@ func run() int {
 			logger.Error("config.db_dsn_file must be set when using --config.db_export")
 			return 1
 		}
-		if err := config.ExportConfigFromDB(*configFile, dbDSN, *configDBQuery, dbID); err != nil {
+		if err := config.ExportConfigFromDB(*configFile, dbDSN, dbSchema, dbTable, dbID); err != nil {
 			logger.Error("Error exporting config", "err", err)
 			return 1
 		}
@@ -204,7 +186,7 @@ func run() int {
 			if dbID == "" {
 				err = fmt.Errorf("id must be specified in DSN file")
 			} else {
-				err = sc.ReloadConfigFromDB(dbDSN, *configDBQuery, dbID, logger)
+				err = sc.ReloadConfigFromDB(dbDSN, dbSchema, dbTable, dbID, logger)
 			}
 		} else {
 			err = sc.ReloadConfig(*configFile, logger)
@@ -443,7 +425,7 @@ func run() int {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if err := config.UpsertConfigToDB(data, dbDSN, *configDBUpsert, dbID); err != nil {
+			if err := config.UpsertConfigToDB(data, dbDSN, dbSchema, dbTable, dbID); err != nil {
 				http.Error(w, sanitizeError(err).Error(), http.StatusInternalServerError)
 				return
 			}
